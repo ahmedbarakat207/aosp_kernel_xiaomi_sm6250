@@ -10,3 +10,10 @@ config SRCARCH
 	option env="SRCARCH"
 
 source "arch/$SRCARCH/Kconfig"
+<<<<<<< HEAD
+=======
+
+source "backports/Kconfig"
+
+source "techpack/Kconfig"
+>>>>>>> e1b1345c9bc0 (wifi: Add packet injection, backports, and fix channel reporting)

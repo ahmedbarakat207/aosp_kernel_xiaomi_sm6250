@@ -6198,6 +6198,184 @@ static void smblib_charger_soc_decimal(struct work_struct *work)
 	power_supply_changed(chg->bms_psy);
 }
 
+<<<<<<< HEAD
+=======
+#ifdef CONFIG_CHARGER_LN8000
+static int fv_over_limit_times;
+#define OVER_FV_MAX_TIMES	10
+static void smblib_check_vbat_work(struct work_struct *work)
+{
+	int rc;
+	int effective_fv_uv;
+	union power_supply_propval val;
+
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+			check_vbat_work.work);
+	if (!chg->cp_psy) {
+		chg->cp_psy = power_supply_get_by_name("bq2597x-standalone");
+		if (!chg->cp_psy){
+			chg->cp_psy = power_supply_get_by_name("ln8000");
+			if (!chg->cp_psy){
+				pr_err("cp_psy not found\n");
+				return;
+			}
+		}
+	}
+
+	rc = power_supply_get_property(chg->cp_psy,
+				POWER_SUPPLY_PROP_MODEL_NAME, &val);
+	if (rc < 0) {
+		pr_err("Error in getting charge IC name, rc=%d\n", rc);
+		return;
+	}
+
+	if (strcmp(val.strval, "bq2597x-standalone") == 0) {
+		rc = power_supply_get_property(chg->cp_psy,
+				POWER_SUPPLY_PROP_TI_BATTERY_VOLTAGE, &val);
+		pr_debug("getting ti battery voltage = %d\n", val.intval);
+		if (rc < 0) {
+			pr_err("Error in getting ti battery voltage, rc=%d\n", rc);
+			return;
+		}
+		if (val.intval > 4800) {
+			if (fv_over_limit_times++  > OVER_FV_MAX_TIMES) {
+				fv_over_limit_times = 0;
+				effective_fv_uv = get_effective_result_locked(chg->fv_votable);
+				vote(chg->fv_votable, BATT_BQ2597X_VOTER, true, effective_fv_uv - 10000);
+			}
+		}
+	}
+	schedule_delayed_work(&chg->check_vbat_work, msecs_to_jiffies(200));
+
+}
+#endif
+
+#define REDUCED_CURRENT		500000
+static int smblib_get_effective_fcc_val(struct smb_charger *chg)
+{
+	int effective_fcc_val = 0;
+
+	effective_fcc_val = get_effective_result(chg->fcc_votable);
+	return effective_fcc_val;
+}
+
+static int check_reduce_fcc_condition(struct smb_charger *chg)
+{
+	union power_supply_propval val = {0, };
+	int rc, ibat = 0;
+	int effective_fcc = 0;
+
+	if (!chg->cp_psy) {
+		chg->cp_psy = power_supply_get_by_name("bq2597x-standalone");
+	}
+
+#ifdef CONFIG_CHARGER_LN8000
+	if (!chg->cp_psy){
+		chg->cp_psy = power_supply_get_by_name("ln8000");
+	}
+#endif
+
+	if (!chg->cp_psy) {
+		pr_err("cp_psy not found\n");
+		return 0;
+	}
+
+	rc = power_supply_get_property(chg->cp_psy,
+				POWER_SUPPLY_PROP_CHARGING_ENABLED, &val);
+	if (rc < 0) {
+		pr_err("Error in getting cp charge enable, rc=%d\n", rc);
+		return 0;
+	}
+	chg->cp_charge_enabled = !!val.intval;
+
+	rc = power_supply_get_property(chg->batt_psy, POWER_SUPPLY_PROP_STATUS,
+						&val);
+	if (rc < 0) {
+		pr_err("Error in getting charging status, rc=%d\n", rc);
+		return 0;
+	}
+	chg->charge_status = val.intval;
+
+	rc = power_supply_get_property(chg->batt_psy,
+					POWER_SUPPLY_PROP_CHARGE_TYPE, &val);
+	if (rc < 0) {
+		pr_err("Error in getting charge type, rc=%d\n", rc);
+		return 0;
+	}
+	chg->charge_type = val.intval;
+
+	rc = power_supply_get_property(chg->batt_psy, POWER_SUPPLY_PROP_HEALTH,
+						&val);
+	if (rc < 0) {
+		pr_err("Error in getting charging status, rc=%d\n", rc);
+		return 0;
+	}
+	chg->batt_health = val.intval;
+
+	pr_info("cp_charge_enabled(%d), charge_status(%d), charge_type(%d), batt_health(%d)\n",
+			chg->cp_charge_enabled, chg->charge_status, chg->charge_type, chg->batt_health);
+
+	/* should add battery health later */
+	if (!chg->cp_charge_enabled ||
+		(chg->charge_status != POWER_SUPPLY_STATUS_CHARGING) ||
+		(chg->charge_type != POWER_SUPPLY_CHARGE_TYPE_FAST) ||
+		(chg->batt_health != POWER_SUPPLY_HEALTH_GOOD))
+		return 0;
+
+	rc = smblib_get_prop_from_bms(chg,
+				POWER_SUPPLY_PROP_CURRENT_NOW, &val);
+	if (rc < 0)
+		return 0;
+
+	ibat = val.intval/1000;
+	if (ibat > -450) {
+		pr_info("Skip CHG ESR, Fails IBAT ibat(%d)\n", ibat);
+		return 0;
+	}
+
+	effective_fcc = smblib_get_effective_fcc_val(chg);
+	if (effective_fcc < 0)
+		return 0;
+
+	return effective_fcc;
+}
+
+/* In order to calculate battery esr */
+static void reduce_fcc_work(struct work_struct *work)
+{
+	struct smb_charger *chg = container_of(work, struct smb_charger,
+							reduce_fcc_work.work);
+	int effective_fcc;
+	int esr_work_time = ESR_WORK_TIME_180S;
+	bool reduce_fcc = false;
+
+	effective_fcc = check_reduce_fcc_condition(chg);
+	if (effective_fcc > 0) {
+		if (chg->esr_work_status == ESR_CHECK_FCC_NOLIMIT) {
+			effective_fcc -= REDUCED_CURRENT;
+			chg->esr_work_status = ESR_CHECK_FCC_LIMITED;
+			reduce_fcc = true;
+			esr_work_time = ESR_WORK_TIME_2S;
+		} else {
+			chg->esr_work_status = ESR_CHECK_FCC_NOLIMIT;
+			reduce_fcc = false;
+			esr_work_time = ESR_WORK_TIME_180S;
+		}
+	} else {
+		chg->esr_work_status = ESR_CHECK_FCC_NOLIMIT;
+		reduce_fcc = false;
+		esr_work_time = ESR_WORK_TIME_180S;
+		pr_info("calculate esr condition not satisfy.\n");
+	}
+
+	vote(chg->fcc_votable, ESR_WORK_VOTER, reduce_fcc, effective_fcc);
+	schedule_delayed_work(&chg->reduce_fcc_work,
+				msecs_to_jiffies(esr_work_time));
+}
+#endif
+#endif
+
+>>>>>>> e1b1345c9bc0 (wifi: Add packet injection, backports, and fix channel reporting)
 static void smblib_micro_usb_plugin(struct smb_charger *chg, bool vbus_rising)
 {
 	if (!vbus_rising) {
